@@ -145,8 +145,25 @@ namespace Loretta.CLI
                             if (sf.Value.Trim() == "self")
                             {
                                 var field = ma.Element("IdentifierToken")!;
-                                var call = assign.Element("EqualsValuesClause")!.Element("MethodCallExpression")!.Element("IdentifierToken")!;
-                                pairs.Add((field.Value.Trim(), call.Value.Trim()));
+                                var eq = assign.Element("EqualsValuesClause");
+                                if (eq != null)
+                                {
+                                    var mc = eq.Element("MethodCallExpression") ?? eq.Element("FunctionCallExpression");
+                                    if (mc != null)
+                                    {
+                                        var call = mc.Element("IdentifierToken")
+                                            ??mc.Element("IdentifierName")?.Element("IdentifierToken")
+                                            ;
+                                        if (call != null)
+                                        {
+                                            pairs.Add((field.Value.Trim(), call.Value.Trim()));
+                                        }
+                                        else //used function to load the 
+                                        {
+                                            pairs.Add((field.Value.Trim(), "unknown"));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
