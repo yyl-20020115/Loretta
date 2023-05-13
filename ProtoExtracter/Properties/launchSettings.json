@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "ProtoExtracter": {
+      "commandName": "Project",
+      "commandLineArgs": "C:\\Working\\DouluoDalu\\luasrc\\sourcelua\\GameSystem\\Game\\Message\\achievement *.lua"
+    }
+  }
+}

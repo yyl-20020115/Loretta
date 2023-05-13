@@ -1,16 +1,18 @@
 ﻿using System.CommandLine;
 using System.CommandLine.NamingConventionBinder;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
+using System.Xml.Linq;
 using Loretta.CodeAnalysis;
 using Loretta.CodeAnalysis.Lua;
 using Loretta.CodeAnalysis.Lua.Experimental;
 using Loretta.CodeAnalysis.Lua.Syntax;
 using Loretta.CodeAnalysis.Text;
+using ProtoExtracter;
 using Tsu.Numerics;
 using Tsu.Timing;
 using Minifying = Loretta.CodeAnalysis.Lua.Experimental.Minifying;
-
 namespace Loretta.CLI
 {
     public static class Program
@@ -22,42 +24,208 @@ namespace Loretta.CLI
         private static TextWriter OutputWriter =>
             s_printOutputPrefixed ? new ConsoleTimingLoggerTextWriter(s_logger) : Console.Out;
 
-        public static void Main()
+
+        public static void Extracts(string directory, string pattern, bool assumeNoOverrides = false)
         {
-            var timingConsole = new TimingLoggerConsole(s_logger);
-
-            s_shouldRun = true;
-            while (s_shouldRun)
+            if (!Directory.Exists(directory))
             {
-                try
-                {
-                    if (s_printCurrentDir)
-                        s_logger.Write(Environment.CurrentDirectory);
-                    s_logger.Write("> ");
+                return;
+            }
 
-                    var line = s_logger.ReadLine() ?? throw new Exception("Unable to read line from input.");
-                    var spaceIdx = line.IndexOf(' ');
-                    if (spaceIdx != -1)
+            var dir = new DirectoryInfo(directory);
+            var files = dir.GetFiles(pattern, SearchOption.AllDirectories);
+            foreach (var file in files)
+            {
+                Extract(file.FullName, assumeNoOverrides);
+            }
+        }
+        public const string ProtoToolGenerated = "该类由协议工具自动生成";
+        public const string ProtoToolExtension = ".proto";
+
+        //int32   Uses variable-length encoding.Inefficient for encoding negative numbers – if your field is likely to have negative values, use sint32 instead.int32   int int
+        //int64   Uses variable-length encoding. Inefficient for encoding negative numbers – if your field is likely to have negative values, use sint64 instead.int64   int/long[4] long
+        //uint32  Uses variable-length encoding.	uint32  int/long[4] uint
+        //uint64  Uses variable-length encoding.	uint64  int/long[4] ulong
+        //sint32  Uses variable-length encoding. Signed int value. These more efficiently encode negative numbers than regular int32s.int32   int int
+        //sint64  Uses variable-length encoding. Signed int value. These more efficiently encode negative numbers than regular int64s.int64   int/long[4] long
+        //fixed32 Always four bytes.More efficient than uint32 if values are often greater than 228.	uint32  int/long[4] uint
+        //fixed64 Always eight bytes.More efficient than uint64 if values are often greater than 256.	uint64  int/long[4] ulong
+        //sfixed32    Always four bytes.int32   int int
+        //sfixed64    Always eight bytes.int64   int/long[4] long
+        //string A string must always contain UTF-8 encoded or 7-bit ASCII text, and cannot be longer than 232.	string str/unicode[5]  string
+        //bytes   May contain any arbitrary sequence of bytes no longer than 232.	string str (Python 2)
+        //bytes(Python 3)    ByteStr
+
+        public static Dictionary<string, string> CallForTypes = new ()
+        {
+            ["readString"] = "String",
+            ["readInt"] = "int32",
+            ["readLong"] ="int64",
+            ["readUInt"] = "uint32",
+            ["readULong"] = "uint64",
+            ["readDouble"] = "double",
+            ["readFloat"] = "float",
+            ["readBool"] = "bool",
+            ["readBytes"] = "bytes",
+            ["readIntListFromList"] ="intlist",
+        };
+        public static string GetTypeForCall(string call)
+        {
+            return CallForTypes.TryGetValue(call, out var result) ? result : call;
+        }
+        public static void Extract(string path, bool assumeNoOverrides = false)
+        {
+            if (!File.Exists(path)) return;
+
+            SourceText sourceText;
+            using (var stream = File.OpenRead(path))
+                sourceText = SourceText.From(stream, Encoding.UTF8);
+            var protoPath = Path.ChangeExtension(path, ProtoToolExtension);
+            LuaSyntaxTree syntaxTree = (LuaSyntaxTree) LuaSyntaxTree.ParseText(
+                sourceText, path: path);
+
+            var rootNode = syntaxTree.GetRoot();
+
+            var xml = TreeDumper.DumpXML(LuaTreeDumperConverter.Convert(rootNode));
+            var root = XElement.Parse(xml);
+
+            if(!root.Descendants().Any(d=>(d is XElement x)&&x.Value.Contains(ProtoToolGenerated)))
+            {
+                return;
+            }
+            root.DescendantNodesAndSelf().Where(x=>(x is XElement m) && m.Name.ToString().Contains("Trivia")).Remove();
+
+            using var protoStreamWriter = new StreamWriter(protoPath);
+
+            var writer = new Proto3Writer(protoStreamWriter);
+            writer.Begin();
+
+            var message_name = Path.GetFileNameWithoutExtension(path);
+            var message_id = "0";
+
+            var unit = root.Element("CompilationUnit")!;
+            var stmt = unit.Element("StatementList")!;
+            var funcs = stmt.Descendants("FunctionDeclarationStatement").ToArray();
+            var any_message = false;
+            var pairs = new List<(string, string)>();
+            foreach (var func in funcs)
+            {
+                var memfunc = func.Element("MemberFunctionName")!;
+                var simplename = memfunc.Element("SimpleFunctionName")?.Element("IdentifierToken");
+                var dot = memfunc.Element("DotToken")!;
+                var idtok = memfunc.Element("IdentifierToken");
+
+                var name = simplename != null && idtok != null
+                    ? simplename.Value.Trim() + dot.Value.Trim() + idtok.Value.Trim()
+                    : idtok!.Value.Trim();
+                if (name.EndsWith("getId"))
+                {
+                    var mid = func.Element("StatementList")!.Element("ReturnStatement")!.Element("NumericalLiteralExpression")!.Element("NumericLiteralToken")!;
+                    //writer.WriteField("id", "int32");
+                    message_id = mid.Value.Trim();
+                }
+                else if (name.EndsWith("getName"))
+                {
+                    var mid = func.Element("StatementList")!.Element("ReturnStatement")!.Element("StringLiteralExpression")!.Element("StringLiteralToken")!;
+                    message_name = mid.Value.Trim();
+
+                    any_message = true;
+                }
+                else if (name.EndsWith("reading"))
+                {                    
+
+                    var assigns = func.Element("StatementList")?.Elements("AssignmentStatement")?.ToArray();
+                    if (assigns != null)
                     {
-                        var verb = line[..spaceIdx];
-                        var rest = line[(spaceIdx + 1)..];
-                        if (verb is "e" or "expr" or "expression" && rest is not ("-h" or "--help"))
+                        foreach (var assign in assigns)
                         {
-                            ParseExpression(rest);
-                            continue;
-                        }
-                        else if (verb is "emlua" or "expr-multi-lua" or "exprmultilua" && rest is not ("-h" or "--help"))
-                        {
-                            MultiLuaExpression(rest);
-                            continue;
+                            var ma = assign.Element("MemberAccessExpression")!;
+                            var sf = ma.Element("IdentifierName")!.Element("IdentifierToken")!;
+                            
+                            if (sf.Value.Trim() == "self")
+                            {
+                                var field = ma.Element("IdentifierToken")!;
+                                var call = assign.Element("EqualsValuesClause")!.Element("MethodCallExpression")!.Element("IdentifierToken")!;
+                                pairs.Add((field.Value.Trim(), call.Value.Trim()));
+                            }
                         }
                     }
-                    s_rootCommand.Invoke(line, timingConsole);
                 }
-                catch (Exception ex) when (!Debugger.IsAttached)
+
+            }
+            if (any_message)
+            {
+                writer.WriteMessageBegin(message_name);
+
+                writer.WriteLineComment($"message_id={message_id}");
+
+                foreach (var pair in pairs)
                 {
-                    s_logger.LogError("Unexpected exception: {0}\n{1}", ex.Message, ex.StackTrace!);
+                    writer.WriteField(pair.Item1, GetTypeForCall(pair.Item2));
                 }
+
+                writer.WriteMessageEnd();
+            }
+            writer.End();
+        }
+
+
+        public static void Main(string[] args)
+        {
+            if (args.Length == 0)
+            {
+
+                var timingConsole = new TimingLoggerConsole(s_logger);
+
+                s_shouldRun = true;
+                while (s_shouldRun)
+                {
+                    try
+                    {
+                        if (s_printCurrentDir)
+                            s_logger.Write(Environment.CurrentDirectory);
+                        s_logger.Write("> ");
+
+                        var line = s_logger.ReadLine() ?? throw new Exception("Unable to read line from input.");
+                        var spaceIdx = line.IndexOf(' ');
+                        if (spaceIdx != -1)
+                        {
+                            var verb = line[..spaceIdx];
+                            var rest = line[(spaceIdx + 1)..];
+                            if (verb is "e" or "expr" or "expression" && rest is not ("-h" or "--help"))
+                            {
+                                ParseExpression(rest);
+                                continue;
+                            }
+                            else if (verb is "emlua" or "expr-multi-lua" or "exprmultilua" && rest is not ("-h" or "--help"))
+                            {
+                                MultiLuaExpression(rest);
+                                continue;
+                            }
+                        }
+                        s_rootCommand.Invoke(line, timingConsole);
+                    }
+                    catch (Exception ex) when (!Debugger.IsAttached)
+                    {
+                        s_logger.LogError("Unexpected exception: {0}\n{1}", ex.Message, ex.StackTrace!);
+                    }
+
+                }
+            }
+            else 
+            {
+                if(args.Length==2)
+                {
+                    var directory = args[0];
+                    var pattern = args[1];
+                    if(Directory.Exists(directory))
+                    {
+                        Extracts(directory,pattern);
+                    }
+
+
+                }
+
             }
         }
 
@@ -187,10 +355,10 @@ namespace Loretta.CLI
             }
         }
 
-        public static void Parse(LuaSyntaxOptionsPreset preset, string path, bool constantFold = false, bool printTree = false, bool assumeNoOverrides = false)
+        public static void Parse(LuaSyntaxOptionsPreset preset, string path, bool constantFold = false, bool printTree = true, bool assumeNoOverrides = false)
         {
             if (!File.Exists(path))
-            {
+             {
                 s_logger.LogError("Provided path does not exist.");
                 return;
             }
@@ -222,7 +390,6 @@ namespace Loretta.CLI
             s_logger.Write("Press any key to continue...");
             Console.ReadKey(true);
             s_logger.WriteLine("");
-
             if (printTree)
             {
                 OutputWriter.WriteLine(TreeDumper.DumpCompact(LuaTreeDumperConverter.Convert(rootNode)));
@@ -239,7 +406,6 @@ namespace Loretta.CLI
             foreach (var variable in global.DeclaredVariables)
                 s_logger.WriteLine($"    {variable.Kind} {variable.Name}");
         }
-
         public static void ParseExpression(string input)
         {
             var options = LuaParseOptions.Default;
@@ -366,7 +532,7 @@ namespace Loretta.CLI
             OutputWriter.WriteLine("");
         }
 
-        #endregion Loretta
+#endregion Loretta
 
         #region Multi-Lua
 
@@ -587,7 +753,6 @@ namespace Loretta.CLI
             };
             parseCommand.Handler = CommandHandler.Create(Parse);
             parseCommand.AddAlias("parse");
-
             var parseExpressionCommand = new Command("e", "Parses the provided expression.")
             {
                 new Argument<LuaSyntaxOptionsPreset>(

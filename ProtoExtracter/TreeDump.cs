@@ -2,10 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections;
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Text;
 
-namespace Loretta.CodeAnalysis
+namespace ProtoExtracter
 {
     // These classes are for debug and testing purposes only. It is frequently handy to be 
     // able to create a string representation of a complex tree-based data type. The idea
@@ -68,9 +69,6 @@ namespace Loretta.CodeAnalysis
 
         private void DoDumpCompact(TreeDumperNode node, string indent)
         {
-            LorettaDebug.Assert(node != null);
-            LorettaDebug.Assert(indent != null);
-
             // Precondition: indentation and prefix has already been output
             // Precondition: indent is correct for node's *children*
             _sb.Append(node.Text);
@@ -108,24 +106,23 @@ namespace Loretta.CodeAnalysis
 
         private void DoDumpXML(TreeDumperNode node, string indent, string relativeIndent)
         {
-            LorettaDebug.Assert(node != null);
             if (node.Children.All(child => child == null))
             {
                 _sb.Append(indent);
                 if (node.Value != null)
                 {
-                    _sb.AppendFormat("<{0}>{1}</{0}>", DumperString(node.Text), DumperString(node.Value));
+                    _sb.AppendFormat("<{0}>{1}</{0}>", node.Text, DumperString(node.Value));
                 }
                 else
                 {
-                    _sb.AppendFormat("<{0} />", DumperString(node.Text));
+                    _sb.AppendFormat("<{0} />", node.Text);
                 }
                 _sb.AppendLine();
             }
             else
             {
                 _sb.Append(indent);
-                _sb.AppendFormat("<{0}>", DumperString(node.Text));
+                _sb.AppendFormat("<{0}>", node.Text);
                 _sb.AppendLine();
                 if (node.Value != null)
                 {
@@ -146,7 +143,7 @@ namespace Loretta.CodeAnalysis
                 }
 
                 _sb.Append(indent);
-                _sb.AppendFormat("</{0}>", DumperString(node.Text));
+                _sb.AppendFormat("</{0}>", node.Text);
                 _sb.AppendLine();
             }
         }
@@ -173,14 +170,6 @@ namespace Loretta.CodeAnalysis
 
             if (o is string str)
             {
-                str = str.Replace(' ', '_');
-                str = str.Replace("<", "&lt;");
-                str = str.Replace(">", "&gt;");
-
-                //if (str.StartsWith("--[[") && str.EndsWith("--]]"))
-                //{
-                //    str = str[4..^4];
-                //}
                 return str;
             }
 
@@ -207,7 +196,7 @@ namespace Loretta.CodeAnalysis
         {
             Text = text;
             Value = value;
-            Children = children ?? SpecializedCollections.EmptyEnumerable<TreeDumperNode>();
+            Children = children ?? new List<TreeDumperNode>();
         }
 
         public TreeDumperNode(string text) : this(text, null, null) { }
