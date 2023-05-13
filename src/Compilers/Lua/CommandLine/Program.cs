@@ -67,7 +67,6 @@ namespace Loretta.CLI
             ["readFloat"] = "float",
             ["readBool"] = "bool",
             ["readBytes"] = "bytes",
-            ["readIntListFromList"] ="intlist",
         };
         public static string GetTypeForCall(string call)
         {
